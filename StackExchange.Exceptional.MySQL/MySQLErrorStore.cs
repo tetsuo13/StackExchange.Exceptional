@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Data;
 using System.Linq;
 using MySql.Data.MySqlClient;
 using StackExchange.Exceptional.Dapper;
@@ -185,36 +184,30 @@ Update Exceptions
             {
                 if (RollupThreshold.HasValue && error.ErrorHash.HasValue)
                 {
-                    var queryParams = new DynamicParameters(new
+                    // Look for an existing exception 
+                    IEnumerable<Error> existingException = c.Query<Error>(@"Select * from Exceptions Where ErrorHash = @ErrorHash
+                                                     And ApplicationName = @ApplicationName
+                                                     And DeletionDate Is Null
+                                                     And CreationDate >= @minDate limit 1 ",
+                        new
+                        {
+                            error.ErrorHash,
+                            ApplicationName = error.ApplicationName.Truncate(50),
+                            minDate = DateTime.UtcNow.Add(RollupThreshold.Value.Negate())
+                        });
+
+
+                    if (existingException.Any())
                     {
-                        error.DuplicateCount,
-                        error.ErrorHash,
-                        ApplicationName = error.ApplicationName.Truncate(50),
-                        minDate = DateTime.UtcNow.Add(RollupThreshold.Value.Negate())
-                    });
-                    var count = c.Execute(@"
-                    Update Exceptions 
-                      Set DuplicateCount = DuplicateCount + @DuplicateCount
-                    Where ErrorHash = @ErrorHash
-                    And ApplicationName = @ApplicationName
-                    And DeletionDate Is Null
-                    And CreationDate >= @minDate limit 1", queryParams);
-                    // if we found an exception that's a duplicate, jump out
-                    if (count > 0)
-                    {
-                        // MySQL .NET Connector doesn't support OUT params, so we need to query for the guid.
-                        error.GUID = c.Query<Guid>(@"Select guid from exceptions 
-                                Where ErrorHash = @ErrorHash
-                                And ApplicationName = @ApplicationName
-                                And DeletionDate Is Null
-                                And CreationDate >= @minDate limit 1 ", queryParams).First();
-                        return;
+                        // Update the count and move on
+                        error.GUID = existingException.First().GUID;
+                        c.Execute("Update Exceptions set DuplicateCount = DuplicateCount + @DuplicateCount where ID = @id", new {error.DuplicateCount, id = existingException.First().Id});
                     }
-                }
+                    else
+                    {
+                        error.FullJson = error.ToJson();
 
-                error.FullJson = error.ToJson();
-
-                c.Execute(@"
+                        c.Execute(@"
 Insert Into Exceptions (GUID, ApplicationName, MachineName, CreationDate, Type, IsProtected, Host, Url, HTTPMethod, IPAddress, Source, Message, Detail, StatusCode, `SQL`, FullJson, ErrorHash, DuplicateCount)
 Values (@GUID, @ApplicationName, @MachineName, @CreationDate, @Type, @IsProtected, @Host, @Url, @HTTPMethod, @IPAddress, @Source, @Message, @Detail, @StatusCode, @SQL, @FullJson, @ErrorHash, @DuplicateCount)",
                             new
@@ -238,9 +231,8 @@ Values (@GUID, @ApplicationName, @MachineName, @CreationDate, @Type, @IsProtecte
                                 error.ErrorHash,
                                 error.DuplicateCount
                             });
-
-                
-                
+                    }
+                }
             }
         }
 
